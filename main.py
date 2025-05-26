@@ -4,6 +4,7 @@ import joblib
 import pandas as pd
 import numpy as np
 from typing import Dict, List
+from sklearn.metrics import pairwise_distances # Added scikit-learn import based on likely usage from requirements
 
 app = FastAPI()
 
@@ -52,16 +53,6 @@ except Exception as e:
     raise HTTPException(status_code=500, detail=f"Error loading model package: {e}")
 
 # Ensure the CATEGORICAL_FEATURES list matches the training script's original categorical columns
-CATEGORICAL_FEATURES_FASTAPI_OLD = [
-    'Gender', 'Marital_Status', 'Profession_Occupation',
-    'Vehicle_Type_Category', 'Vehicle_Make', 'Vehicle_Model',
-    'Primary_Use_of_Vehicle', 'ABS', 'Airbags',
-    'Electronic_Stability_Control', 'Blind Spot Monitoring',
-    'Lane Keeping Assist', 'Automatic Emergency Braking',
-    'Parking_Location', 'Geographic_Location_City', 'Owns Boat'
-]
-
-# Updated CATEGORICAL_FEATURES to match the new request
 CATEGORICAL_FEATURES_FASTAPI = [
     'Gender', 'Marital_Status', 'Profession',
     'Vehicle_Type', 'Vehicle_Make', 'Vehicle_Model',
