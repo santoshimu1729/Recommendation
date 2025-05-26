@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import joblib
 import pandas as pd
@@ -7,6 +8,21 @@ from typing import Dict, List
 from sklearn.metrics import pairwise_distances # Added scikit-learn import based on likely usage from requirements
 
 app = FastAPI()
+
+# Configure CORS
+origins = [
+    "*"  # Allows all origins - VERY permissive and NOT recommended for production
+    # "http://localhost:3000", # Example: Allow requests from your frontend running on port 3000
+    # "https://your-frontend-domain.com", # Example: Allow requests from your production frontend
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Define the expected input data structure - Ensure field names match the new sample request
 class InputData(BaseModel):
