@@ -8,3 +8,4 @@ python-dateutil
 python-json-logger
 pytz
 requests
+xgboost==2.0.3  # Or xgboost==1.7.6 or just xgboost
