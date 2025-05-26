@@ -85,6 +85,10 @@ INPUT_FIELD_MAPPING = {
     # 'Owns Boat' will be handled if present in the request
 }
 
+@app.get("/")
+async def welcome():
+    return {"message": "Welcome to recommendation system"}
+
 @app.post("/predict", response_model=PredictionResponse)
 async def predict_risk(data: InputData):
     try:
