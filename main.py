@@ -42,7 +42,7 @@ class PredictionResponse(BaseModel):
 
 # Load the trained models and feature columns
 try:
-    model_package = joblib.load("C:\\Users\\santo\\Downloads\\FastAPI_RecommendationModel\\finalLearning.pkl")
+    model_package = joblib.load("finalLearning.pkl")
     loaded_models = model_package['models']
     loaded_feature_columns = model_package['feature_columns']
     loaded_categorical_features = model_package['categorical_features']
