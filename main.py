@@ -1,11 +1,12 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field # Import Field for better validation/description
 import joblib
 import pandas as pd
 import numpy as np
-from typing import Dict, List
-from sklearn.metrics import pairwise_distances # Added scikit-learn import based on likely usage from requirements
+from typing import Dict, List, Optional, Set # Import Set for unique coverages
+from sklearn.metrics import pairwise_distances
+import datetime # To get the current year
 
 app = FastAPI()
 
@@ -24,7 +25,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Define the expected input data structure - Ensure field names match the new sample request
+# Define the expected input data structure for original /predict endpoint
 class InputData(BaseModel):
     Age: int
     Gender: str
@@ -45,10 +46,9 @@ class InputData(BaseModel):
     Safety_Features_ESC: str
     Parking_Location: str
     Geographic_Location: str
-    # 'Owns Boat' is missing in the new request, keeping it optional if needed
     Owns_Boat: str = None
 
-# Define the response structure
+# Define the response structure for original /predict endpoint
 class PredictionItem(BaseModel):
     coverage: str
     predicted_value: int
@@ -57,6 +57,32 @@ class PredictionItem(BaseModel):
 class PredictionResponse(BaseModel):
     predictions: List[PredictionItem]
 
+# --- NEW MODELS FOR /predict_coverage ENDPOINT ---
+
+# Define the input data structure for the new /predict_coverage endpoint
+class CoverageRequest(BaseModel):
+    Policy_ID: str
+    NewVehicle: str
+    VehicleType: str = Field(..., description="Possible values: 4wheeler or 2wheeler")
+    VehicleMake: str
+    VehicleModel: str
+    VehicleYear: int
+    VehicleIDV: int = Field(..., description="Insured Declared Value")
+    VehicleFuelType: str = Field(..., description="Possible values: Petrol, Diesel, CNG, Hybrid")
+    City: str
+    PostalCode: int
+
+# Define the recommendation item structure for the new /predict_coverage endpoint
+class CoverageRecommendationItem(BaseModel):
+    coveragesPatternCode: str = Field(..., description="Comma-separated list of recommended coverages")
+    reason: str
+
+# Define the response structure for the new /predict_coverage endpoint
+class CoverageRecommendationResponse(BaseModel):
+    recommendations: List[CoverageRecommendationItem]
+
+# --- END NEW MODELS ---
+
 # Load the trained models and feature columns
 try:
     model_package = joblib.load("finalLearning.pkl")
@@ -64,9 +90,16 @@ try:
     loaded_feature_columns = model_package['feature_columns']
     loaded_categorical_features = model_package['categorical_features']
 except FileNotFoundError:
-    raise HTTPException(status_code=500, detail="Error: finalLearning.pkl not found.")
+    print("Warning: finalLearning.pkl not found. /predict endpoint will not function correctly.")
+    loaded_models = {}
+    loaded_feature_columns = []
+    loaded_categorical_features = []
 except Exception as e:
-    raise HTTPException(status_code=500, detail=f"Error loading model package: {e}")
+    print(f"Warning: Error loading model package: {e}. /predict endpoint will not function correctly.")
+    loaded_models = {}
+    loaded_feature_columns = []
+    loaded_categorical_features = []
+
 
 # Ensure the CATEGORICAL_FEATURES list matches the training script's original categorical columns
 CATEGORICAL_FEATURES_FASTAPI = [
@@ -101,12 +134,47 @@ INPUT_FIELD_MAPPING = {
     # 'Owns Boat' will be handled if present in the request
 }
 
+# --- Common Coverages for easy reference ---
+ALL_COVERAGES = {
+    "PersonalAccident", "PassengerProtection", "EngineProtection",
+    "ReturnToInvoice", "RoadsideAssistance", "NCBProtection",
+    "KeyReplacement", "Consumables", "LegLiabPaidDriver",
+    "UnnamedPARider", "ZeroDeprecCover"
+}
+
+# Define sets of coverages for each scenario to easily take unions
+COVERAGES_SCENARIO_1 = {
+    "ZeroDeprecCover", "EngineProtection", "ReturnToInvoice",
+    "RoadsideAssistance", "Consumables", "PersonalAccident",
+    "PassengerProtection"
+} # Reason: "New car"
+
+COVERAGES_SCENARIO_2 = {
+    "EngineProtection", "Consumables", "PersonalAccident"
+} # Reason: "Flood prone zones"
+
+COVERAGES_SCENARIO_3 = {
+    "ZeroDeprecCover", "EngineProtection", "ReturnToInvoice",
+    "RoadsideAssistance", "Consumables", "PassengerProtection",
+    "NCBProtection", "KeyReplacement", "LegLiabPaidDriver",
+    "UnnamedPARider"
+} # Reason: "Premium cars"
+
+COVERAGES_DEFAULT = {
+    "PersonalAccident", "RoadsideAssistance"
+} # Reason: "Standard recommendations"
+
+
+# --- API Endpoints ---
+
 @app.get("/")
 async def welcome():
     return {"message": "Welcome to recommendation system"}
 
 @app.post("/predict", response_model=PredictionResponse)
 async def predict_risk(data: InputData):
+    if not loaded_models:
+        raise HTTPException(status_code=503, detail="Prediction service unavailable: Model not loaded.")
     try:
         input_dict = data.dict(exclude_none=True)
         # Create a DataFrame with columns matching the training data
@@ -120,9 +188,11 @@ async def predict_risk(data: InputData):
         input_df = pd.DataFrame(mapped_input_data)
 
         # Preprocess the input data
+        # Ensure that get_dummies handles potential new categorical features not seen in training
+        # For simplicity, this example assumes categories are consistent or handled by fill_value=0
         input_encoded = pd.get_dummies(input_df, columns=[INPUT_FIELD_MAPPING.get(col) for col in CATEGORICAL_FEATURES_FASTAPI if INPUT_FIELD_MAPPING.get(col) in input_df.columns or col == 'Owns Boat' and 'Owns Boat' in input_df.columns], drop_first=True)
 
-        # Reindex to align with the training data's columns
+        # Reindex to align with the training data's columns, filling missing with 0
         final_input = input_encoded.reindex(columns=loaded_feature_columns, fill_value=0)
 
         predictions = []
@@ -131,9 +201,12 @@ async def predict_risk(data: InputData):
             prediction = model.predict(final_input)[0]
             predicted_risk_score = int(np.clip(np.round(prediction), 1, 5))
 
-            # Get global feature importance
-            importance = model.feature_importances_
-            feature_importance_dict_full = {loaded_feature_columns[i]: importance[i] for i in range(len(loaded_feature_columns))}
+            # Get global feature importance (this assumes model has feature_importances_)
+            # If the model doesn't have it (e.g., some simple linear models), you'd need a different approach
+            importance = getattr(model, 'feature_importances_', None)
+            feature_importance_dict_full = {}
+            if importance is not None:
+                feature_importance_dict_full = {loaded_feature_columns[i]: importance[i] for i in range(len(loaded_feature_columns))}
 
             # Filter contributing factors to only include importance of input features
             input_features_for_factors = {}
@@ -162,9 +235,76 @@ async def predict_risk(data: InputData):
         return PredictionResponse(predictions=predictions)
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
 
-# Sample Request (to test with a client like Postman or curl)
+
+@app.post("/predict_coverage", response_model=CoverageRecommendationResponse)
+async def predict_coverage(data: CoverageRequest):
+    """
+    Recommends vehicle coverages based on predefined scenarios.
+    """
+    current_year = datetime.datetime.now().year
+    recommended_coverages: Set[str] = set() # Use a set to store unique coverages
+    reasons: List[str] = []
+    
+    # Normalize city input for case-insensitive matching
+    city_lower = data.City.lower()
+    
+    # Define cities prone to floods
+    flood_prone_cities = {"mumbai", "chennai", "kochi", "guwahati"}
+
+    # Evaluate scenarios in order of specificity (most specific first)
+
+    # Scenario 7: All three conditions
+    is_new_car_condition = data.VehicleYear >= current_year - 1 # Current year - 1 is 2024
+    is_flood_prone_city = city_lower in flood_prone_cities
+    is_premium_car = data.VehicleIDV > 2500000
+
+    if is_new_car_condition and is_flood_prone_city and is_premium_car:
+        recommended_coverages.update(COVERAGES_SCENARIO_1)
+        recommended_coverages.update(COVERAGES_SCENARIO_2)
+        recommended_coverages.update(COVERAGES_SCENARIO_3)
+        reasons.append("New premium car in flood prone zone")
+    # Combined Scenarios (more specific than individual ones)
+    elif is_new_car_condition and is_flood_prone_city:
+        recommended_coverages.update(COVERAGES_SCENARIO_1)
+        recommended_coverages.update(COVERAGES_SCENARIO_2)
+        reasons.append("New car in flood prone zone")
+    elif is_new_car_condition and is_premium_car:
+        recommended_coverages.update(COVERAGES_SCENARIO_1)
+        recommended_coverages.update(COVERAGES_SCENARIO_3)
+        reasons.append("New premium car")
+    elif is_flood_prone_city and is_premium_car:
+        recommended_coverages.update(COVERAGES_SCENARIO_2)
+        recommended_coverages.update(COVERAGES_SCENARIO_3)
+        reasons.append("Premium car in flood prone zone")
+    # Original Scenarios (if no combined scenario matches)
+    elif is_new_car_condition:
+        recommended_coverages.update(COVERAGES_SCENARIO_1)
+        reasons.append("New car")
+    elif is_flood_prone_city:
+        recommended_coverages.update(COVERAGES_SCENARIO_2)
+        reasons.append("Flood prone zones")
+    elif is_premium_car:
+        recommended_coverages.update(COVERAGES_SCENARIO_3)
+        reasons.append("Premium cars")
+    else:
+        # Default scenario if no specific conditions are met
+        recommended_coverages.update(COVERAGES_DEFAULT)
+        reasons.append("Standard recommendations")
+
+    # Format the response
+    return CoverageRecommendationResponse(
+        recommendations=[
+            CoverageRecommendationItem(
+                coveragesPatternCode=", ".join(sorted(list(recommended_coverages))), # Sort for consistent output
+                reason="; ".join(reasons) # Combine reasons if multiple apply
+            )
+        ]
+    )
+
+
+# Sample Request (to test with a client like Postman or curl) for /predict
 """
 {
     "Age": 30,
@@ -189,8 +329,66 @@ async def predict_risk(data: InputData):
 }
 """
 
-# To run this FastAPI application:
-# 1. Save the code as a Python file (e.g., main.py).
-# 2. Make sure you have FastAPI and Uvicorn installed: pip install fastapi uvicorn
-# 3. Run the application from your terminal: uvicorn main:app --reload
-# 4. You can then send POST requests to http://127.0.0.1:8000/predict with the sample request data.
+# Sample Request for /predict_coverage
+"""
+{
+    "Policy_ID": "publicId_123",
+    "NewVehicle": "Yes",
+    "VehicleType": "4wheeler",
+    "VehicleMake": "Toyota",
+    "VehicleModel": "Camry",
+    "VehicleYear": 2024,
+    "VehicleIDV": 2700000,
+    "VehicleFuelType": "Petrol",
+    "City": "Chennai",
+    "PostalCode": 600001
+}
+"""
+
+# Sample request for /predict_coverage (another example: only New Car)
+"""
+{
+    "Policy_ID": "publicId_456",
+    "NewVehicle": "Yes",
+    "VehicleType": "4wheeler",
+    "VehicleMake": "Honda",
+    "VehicleModel": "Civic",
+    "VehicleYear": 2025,
+    "VehicleIDV": 1500000,
+    "VehicleFuelType": "Petrol",
+    "City": "Bangalore",
+    "PostalCode": 560001
+}
+"""
+
+# Sample request for /predict_coverage (another example: only Flood Prone City)
+"""
+{
+    "Policy_ID": "publicId_789",
+    "NewVehicle": "No",
+    "VehicleType": "4wheeler",
+    "VehicleMake": "Maruti",
+    "VehicleModel": "Swift",
+    "VehicleYear": 2020,
+    "VehicleIDV": 500000,
+    "VehicleFuelType": "Petrol",
+    "City": "Kochi",
+    "PostalCode": 682001
+}
+"""
+
+# Sample request for /predict_coverage (another example: Default)
+"""
+{
+    "Policy_ID": "publicId_101",
+    "NewVehicle": "No",
+    "VehicleType": "4wheeler",
+    "VehicleMake": "Hyundai",
+    "VehicleModel": "i20",
+    "VehicleYear": 2022,
+    "VehicleIDV": 700000,
+    "VehicleFuelType": "Petrol",
+    "City": "Pune",
+    "PostalCode": 411001
+}
+"""
