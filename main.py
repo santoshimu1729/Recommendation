@@ -74,7 +74,8 @@ class CoverageRequest(BaseModel):
 
 # Define the recommendation item structure for the new /predict_coverage endpoint
 class CoverageRecommendationItem(BaseModel):
-    coveragesPatternCode: str = Field(..., description="Comma-separated list of recommended coverages")
+    # CHANGED: coveragesPatternCode is now a List[str]
+    coveragesPatternCode: List[str] = Field(..., description="List of recommended coverages")
     reason: str
 
 # Define the response structure for the new /predict_coverage endpoint
@@ -243,7 +244,7 @@ async def predict_coverage(data: CoverageRequest):
     """
     Recommends vehicle coverages based on predefined scenarios.
     """
-    current_year = datetime.datetime.now().year
+    current_year = datetime.datetime.now().year # Current time is Thursday, July 3, 2025 at 10:05:57 AM IST.
     recommended_coverages: Set[str] = set() # Use a set to store unique coverages
     reasons: List[str] = []
     
@@ -256,7 +257,8 @@ async def predict_coverage(data: CoverageRequest):
     # Evaluate scenarios in order of specificity (most specific first)
 
     # Scenario 7: All three conditions
-    is_new_car_condition = data.VehicleYear >= current_year - 1 # Current year - 1 is 2024
+    # Vehicle_Year >= current_year - 1 evaluates to Vehicle_Year >= 2024
+    is_new_car_condition = data.VehicleYear >= current_year - 1
     is_flood_prone_city = city_lower in flood_prone_cities
     is_premium_car = data.VehicleIDV > 2500000
 
@@ -297,7 +299,8 @@ async def predict_coverage(data: CoverageRequest):
     return CoverageRecommendationResponse(
         recommendations=[
             CoverageRecommendationItem(
-                coveragesPatternCode=", ".join(sorted(list(recommended_coverages))), # Sort for consistent output
+                # CHANGED: Convert set to a sorted list
+                coveragesPatternCode=sorted(list(recommended_coverages)),
                 reason="; ".join(reasons) # Combine reasons if multiple apply
             )
         ]
@@ -329,7 +332,7 @@ async def predict_coverage(data: CoverageRequest):
 }
 """
 
-# Sample Request for /predict_coverage
+# Sample Request for /predict_coverage - Example 1: New Car and Premium Car in Flood Prone City
 """
 {
     "Policy_ID": "publicId_123",
@@ -345,7 +348,30 @@ async def predict_coverage(data: CoverageRequest):
 }
 """
 
-# Sample request for /predict_coverage (another example: only New Car)
+# Expected output for the above Sample Request 1:
+# {
+#   "recommendations": [
+#     {
+#       "coveragesPatternCode": [
+#         "Consumables",
+#         "EngineProtection",
+#         "KeyReplacement",
+#         "LegLiabPaidDriver",
+#         "NCBProtection",
+#         "PassengerProtection",
+#         "PersonalAccident",
+#         "ReturnToInvoice",
+#         "RoadsideAssistance",
+#         "UnnamedPARider",
+#         "ZeroDeprecCover"
+#       ],
+#       "reason": "New premium car in flood prone zone"
+#     }
+#   ]
+# }
+
+
+# Sample request for /predict_coverage - Example 2: only New Car
 """
 {
     "Policy_ID": "publicId_456",
@@ -360,8 +386,25 @@ async def predict_coverage(data: CoverageRequest):
     "PostalCode": 560001
 }
 """
+# Expected output for the above Sample Request 2:
+# {
+#   "recommendations": [
+#     {
+#       "coveragesPatternCode": [
+#         "Consumables",
+#         "EngineProtection",
+#         "PassengerProtection",
+#         "PersonalAccident",
+#         "ReturnToInvoice",
+#         "RoadsideAssistance",
+#         "ZeroDeprecCover"
+#       ],
+#       "reason": "New car"
+#     }
+#   ]
+# }
 
-# Sample request for /predict_coverage (another example: only Flood Prone City)
+# Sample request for /predict_coverage - Example 3: only Flood Prone City
 """
 {
     "Policy_ID": "publicId_789",
@@ -376,8 +419,21 @@ async def predict_coverage(data: CoverageRequest):
     "PostalCode": 682001
 }
 """
+# Expected output for the above Sample Request 3:
+# {
+#   "recommendations": [
+#     {
+#       "coveragesPatternCode": [
+#         "Consumables",
+#         "EngineProtection",
+#         "PersonalAccident"
+#       ],
+#       "reason": "Flood prone zones"
+#     }
+#   ]
+# }
 
-# Sample request for /predict_coverage (another example: Default)
+# Sample request for /predict_coverage - Example 4: Default Scenario
 """
 {
     "Policy_ID": "publicId_101",
@@ -392,3 +448,15 @@ async def predict_coverage(data: CoverageRequest):
     "PostalCode": 411001
 }
 """
+# Expected output for the above Sample Request 4:
+# {
+#   "recommendations": [
+#     {
+#       "coveragesPatternCode": [
+#         "PersonalAccident",
+#         "RoadsideAssistance"
+#       ],
+#       "reason": "Standard recommendations"
+#     }
+#   ]
+# }
