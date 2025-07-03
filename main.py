@@ -1,20 +1,18 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field # Import Field for better validation/description
+from pydantic import BaseModel, Field
 import joblib
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Set # Import Set for unique coverages
+from typing import Dict, List, Optional, Set
 from sklearn.metrics import pairwise_distances
-import datetime # To get the current year
+import datetime
 
 app = FastAPI()
 
 # Configure CORS
 origins = [
-    "*"  # Allows all origins - VERY permissive and NOT recommended for production
-    # "http://localhost:3000", # Example: Allow requests from your frontend running on port 3000
-    # "https://your-frontend-domain.com", # Example: Allow requests from your production frontend
+    "*"
 ]
 
 app.add_middleware(
@@ -74,7 +72,6 @@ class CoverageRequest(BaseModel):
 
 # Define the recommendation item structure for the new /predict_coverage endpoint
 class CoverageRecommendationItem(BaseModel):
-    # CHANGED: coveragesPatternCode is now a List[str]
     coveragesPatternCode: List[str] = Field(..., description="List of recommended coverages")
     reason: str
 
@@ -108,7 +105,7 @@ CATEGORICAL_FEATURES_FASTAPI = [
     'Vehicle_Type', 'Vehicle_Make', 'Vehicle_Model',
     'Primary_Use', 'Safety_Features_ABS', 'Safety_Features_Airbags',
     'Safety_Features_ESC', 'Blind Spot Monitoring', 'Lane Keeping Assist', 'Automatic Emergency Braking',
-    'Parking_Location', 'Geographic_Location', 'Owns Boat' # Keeping 'Owns Boat' for consistency
+    'Parking_Location', 'Geographic_Location', 'Owns Boat'
 ]
 
 # Mapping for the keys in the new request format to the keys expected by the trained model
@@ -132,7 +129,6 @@ INPUT_FIELD_MAPPING = {
     "Safety_Features_ESC": "Electronic Stability Control",
     "Parking_Location": "Parking Location",
     "Geographic_Location": "Geographic Location/City"
-    # 'Owns Boat' will be handled if present in the request
 }
 
 # --- Common Coverages for easy reference ---
@@ -143,7 +139,7 @@ ALL_COVERAGES = {
     "UnnamedPARider", "ZeroDeprecCover"
 }
 
-# Define sets of coverages for each scenario to easily take unions
+# Define sets of coverages for each scenario
 COVERAGES_SCENARIO_1 = {
     "ZeroDeprecCover", "EngineProtection", "ReturnToInvoice",
     "RoadsideAssistance", "Consumables", "PersonalAccident",
@@ -184,16 +180,12 @@ async def predict_risk(data: InputData):
             if request_key in INPUT_FIELD_MAPPING:
                 mapped_input_data[INPUT_FIELD_MAPPING[request_key]] = [request_value]
             elif request_key == 'Owns_Boat':
-                mapped_input_data['Owns Boat'] = [request_value] # Handle 'Owns Boat' if provided
+                mapped_input_data['Owns Boat'] = [request_value]
 
         input_df = pd.DataFrame(mapped_input_data)
 
-        # Preprocess the input data
-        # Ensure that get_dummies handles potential new categorical features not seen in training
-        # For simplicity, this example assumes categories are consistent or handled by fill_value=0
         input_encoded = pd.get_dummies(input_df, columns=[INPUT_FIELD_MAPPING.get(col) for col in CATEGORICAL_FEATURES_FASTAPI if INPUT_FIELD_MAPPING.get(col) in input_df.columns or col == 'Owns Boat' and 'Owns Boat' in input_df.columns], drop_first=True)
 
-        # Reindex to align with the training data's columns, filling missing with 0
         final_input = input_encoded.reindex(columns=loaded_feature_columns, fill_value=0)
 
         predictions = []
@@ -202,14 +194,11 @@ async def predict_risk(data: InputData):
             prediction = model.predict(final_input)[0]
             predicted_risk_score = int(np.clip(np.round(prediction), 1, 5))
 
-            # Get global feature importance (this assumes model has feature_importances_)
-            # If the model doesn't have it (e.g., some simple linear models), you'd need a different approach
             importance = getattr(model, 'feature_importances_', None)
             feature_importance_dict_full = {}
             if importance is not None:
                 feature_importance_dict_full = {loaded_feature_columns[i]: importance[i] for i in range(len(loaded_feature_columns))}
 
-            # Filter contributing factors to only include importance of input features
             input_features_for_factors = {}
             for request_key in input_dict.keys():
                 original_feature_name = INPUT_FIELD_MAPPING.get(request_key)
@@ -224,7 +213,6 @@ async def predict_risk(data: InputData):
                             input_features_for_factors[request_key] = importance_score
                             break
 
-            # Create the prediction item
             coverage_name = target_col.replace("Risk Score - ", "")
             prediction_item = PredictionItem(
                 coverage=coverage_name,
@@ -242,11 +230,12 @@ async def predict_risk(data: InputData):
 @app.post("/predict_coverage", response_model=CoverageRecommendationResponse)
 async def predict_coverage(data: CoverageRequest):
     """
-    Recommends vehicle coverages based on predefined scenarios.
+    Recommends vehicle coverages based strictly on the three original scenarios
+    provided in the requirements, allowing for multiple entries if multiple
+    original conditions are met.
     """
-    current_year = datetime.datetime.now().year # Current time is Thursday, July 3, 2025 at 10:05:57 AM IST.
-    recommended_coverages: Set[str] = set() # Use a set to store unique coverages
-    reasons: List[str] = []
+    current_year = datetime.datetime.now().year # Current year is 2025
+    final_recommendations_list: List[CoverageRecommendationItem] = []
     
     # Normalize city input for case-insensitive matching
     city_lower = data.City.lower()
@@ -254,57 +243,51 @@ async def predict_coverage(data: CoverageRequest):
     # Define cities prone to floods
     flood_prone_cities = {"mumbai", "chennai", "kochi", "guwahati"}
 
-    # Evaluate scenarios in order of specificity (most specific first)
-
-    # Scenario 7: All three conditions
-    # Vehicle_Year >= current_year - 1 evaluates to Vehicle_Year >= 2024
-    is_new_car_condition = data.VehicleYear >= current_year - 1
+    # Evaluate conditions
+    is_new_car_condition = data.VehicleYear >= current_year - 1 # True if VehicleYear is 2024 or 2025
     is_flood_prone_city = city_lower in flood_prone_cities
     is_premium_car = data.VehicleIDV > 2500000
 
-    if is_new_car_condition and is_flood_prone_city and is_premium_car:
-        recommended_coverages.update(COVERAGES_SCENARIO_1)
-        recommended_coverages.update(COVERAGES_SCENARIO_2)
-        recommended_coverages.update(COVERAGES_SCENARIO_3)
-        reasons.append("New premium car in flood prone zone")
-    # Combined Scenarios (more specific than individual ones)
-    elif is_new_car_condition and is_flood_prone_city:
-        recommended_coverages.update(COVERAGES_SCENARIO_1)
-        recommended_coverages.update(COVERAGES_SCENARIO_2)
-        reasons.append("New car in flood prone zone")
-    elif is_new_car_condition and is_premium_car:
-        recommended_coverages.update(COVERAGES_SCENARIO_1)
-        recommended_coverages.update(COVERAGES_SCENARIO_3)
-        reasons.append("New premium car")
-    elif is_flood_prone_city and is_premium_car:
-        recommended_coverages.update(COVERAGES_SCENARIO_2)
-        recommended_coverages.update(COVERAGES_SCENARIO_3)
-        reasons.append("Premium car in flood prone zone")
-    # Original Scenarios (if no combined scenario matches)
-    elif is_new_car_condition:
-        recommended_coverages.update(COVERAGES_SCENARIO_1)
-        reasons.append("New car")
-    elif is_flood_prone_city:
-        recommended_coverages.update(COVERAGES_SCENARIO_2)
-        reasons.append("Flood prone zones")
-    elif is_premium_car:
-        recommended_coverages.update(COVERAGES_SCENARIO_3)
-        reasons.append("Premium cars")
-    else:
-        # Default scenario if no specific conditions are met
-        recommended_coverages.update(COVERAGES_DEFAULT)
-        reasons.append("Standard recommendations")
-
-    # Format the response
-    return CoverageRecommendationResponse(
-        recommendations=[
+    # Apply each original scenario independently
+    # If the condition is met, add its specific recommendation to the list.
+    
+    # Scenario 1: New Car
+    if is_new_car_condition:
+        final_recommendations_list.append(
             CoverageRecommendationItem(
-                # CHANGED: Convert set to a sorted list
-                coveragesPatternCode=sorted(list(recommended_coverages)),
-                reason="; ".join(reasons) # Combine reasons if multiple apply
+                coveragesPatternCode=sorted(list(COVERAGES_SCENARIO_1)),
+                reason="New car"
             )
-        ]
-    )
+        )
+    
+    # Scenario 2: Flood Prone City
+    if is_flood_prone_city:
+        final_recommendations_list.append(
+            CoverageRecommendationItem(
+                coveragesPatternCode=sorted(list(COVERAGES_SCENARIO_2)),
+                reason="Flood prone zones"
+            )
+        )
+
+    # Scenario 3: Premium Car
+    if is_premium_car:
+        final_recommendations_list.append(
+            CoverageRecommendationItem(
+                coveragesPatternCode=sorted(list(COVERAGES_SCENARIO_3)),
+                reason="Premium cars"
+            )
+        )
+            
+    # Default scenario: If none of the above specific conditions were met
+    if not final_recommendations_list:
+        final_recommendations_list.append(
+            CoverageRecommendationItem(
+                coveragesPatternCode=sorted(list(COVERAGES_DEFAULT)),
+                reason="Standard recommendations"
+            )
+        )
+            
+    return CoverageRecommendationResponse(recommendations=final_recommendations_list)
 
 
 # Sample Request (to test with a client like Postman or curl) for /predict
@@ -333,6 +316,7 @@ async def predict_coverage(data: CoverageRequest):
 """
 
 # Sample Request for /predict_coverage - Example 1: New Car and Premium Car in Flood Prone City
+# This will now return three separate recommendations, one for each original scenario met.
 """
 {
     "Policy_ID": "publicId_123",
@@ -348,9 +332,29 @@ async def predict_coverage(data: CoverageRequest):
 }
 """
 
-# Expected output for the above Sample Request 1:
+# Expected Output for Example 1 (All three original scenarios are met):
 # {
 #   "recommendations": [
+#     {
+#       "coveragesPatternCode": [
+#         "Consumables",
+#         "EngineProtection",
+#         "PassengerProtection",
+#         "PersonalAccident",
+#         "ReturnToInvoice",
+#         "RoadsideAssistance",
+#         "ZeroDeprecCover"
+#       ],
+#       "reason": "New car"
+#     },
+#     {
+#       "coveragesPatternCode": [
+#         "Consumables",
+#         "EngineProtection",
+#         "PersonalAccident"
+#       ],
+#       "reason": "Flood prone zones"
+#     },
 #     {
 #       "coveragesPatternCode": [
 #         "Consumables",
@@ -359,13 +363,12 @@ async def predict_coverage(data: CoverageRequest):
 #         "LegLiabPaidDriver",
 #         "NCBProtection",
 #         "PassengerProtection",
-#         "PersonalAccident",
 #         "ReturnToInvoice",
 #         "RoadsideAssistance",
 #         "UnnamedPARider",
 #         "ZeroDeprecCover"
 #       ],
-#       "reason": "New premium car in flood prone zone"
+#       "reason": "Premium cars"
 #     }
 #   ]
 # }
@@ -433,7 +436,7 @@ async def predict_coverage(data: CoverageRequest):
 #   ]
 # }
 
-# Sample request for /predict_coverage - Example 4: Default Scenario
+# Sample request for /predict_coverage - Example 4: Default Scenario (no specific conditions met)
 """
 {
     "Policy_ID": "publicId_101",
